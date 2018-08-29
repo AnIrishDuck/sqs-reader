@@ -8,3 +8,5 @@ services:
 before_install:
   - docker run -v $PWD:/volume -t clux/muslrust cargo build
   - sudo docker build -t anirishduck/sqs-reader .
+
+script: bash push.sh
