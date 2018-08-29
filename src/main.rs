@@ -1,11 +1,10 @@
+extern crate docopt;
 extern crate rusoto_core;
 extern crate rusoto_sqs;
-
 #[macro_use]
 extern crate serde_json;
 
-use std::collections::HashMap;
-
+use docopt::Docopt;
 use rusoto_core::Region;
 use rusoto_sqs::{
     DeleteMessageRequest,
@@ -15,18 +14,39 @@ use rusoto_sqs::{
     SqsClient,
     Sqs
 };
+use std::collections::HashMap;
+
+const USAGE: &'static str = "
+Simple SQS queue reader. Automatically retries and deduplicates until the
+desired number of messages have been read.
+
+Usage:
+    sqs-reader <queue-name> <count> [--full] [--drain]
+    sqs-reader -h | --help
+
+Options:
+  -h, --help        Show this screen.
+  --full            Print full response with message attributes instead of
+                    message body.
+  --drain           Remove messages from queue after all have been read.
+";
+
 
 fn main () {
-    let region = Region::UsWest2;
+    let args = Docopt::new(USAGE)
+                      .and_then(|dopt| dopt.parse())
+                      .unwrap_or_else(|e| e.exit());
+    let region = Region::default();
 
     let sqs = SqsClient::new(region);
     let url = sqs.get_queue_url(GetQueueUrlRequest {
-        queue_name: "fmurphy-test-queue".to_string(),
+        queue_name: args.get_str("<queue-name>").to_string(),
         queue_owner_aws_account_id: None
     }).sync().unwrap().queue_url.unwrap();
 
     let mut all_messages = HashMap::new();
-    while all_messages.len() < 4 {
+    let count: i32 = args.get_str("<count>").parse().unwrap();
+    while all_messages.len() < count as usize {
         let response = sqs.receive_message(ReceiveMessageRequest {
             attribute_names: Some(vec!("All".to_string())),
             max_number_of_messages: Some(1),
@@ -51,7 +71,7 @@ fn main () {
     // Wait until all messages have been received to purge them. This reduces,
     // but does not eliminate, the chance of message "loss". One of the API
     // calls below can still theoretically panic.
-    if false {
+    if args.get_bool("--drain") {
         for (_id, message) in &all_messages {
             let copy = message.clone();
             sqs.delete_message(DeleteMessageRequest {
@@ -62,7 +82,7 @@ fn main () {
     }
 
     for (_id, message) in all_messages {
-        if true {
+        if args.get_bool("--full") {
             print_full_message(message);
         } else {
             println!("{}", message.body.unwrap());
