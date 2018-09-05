@@ -5,14 +5,17 @@ extern crate rusoto_sqs;
 extern crate serde_json;
 
 use docopt::Docopt;
+use docopt::Value::Plain;
 use rusoto_core::Region;
 use rusoto_sqs::{
     DeleteMessageRequest,
     GetQueueAttributesRequest,
     GetQueueAttributesResult,
+    GetQueueUrlError,
     GetQueueUrlRequest,
     Message,
     ReceiveMessageRequest,
+    SendMessageRequest,
     SqsClient,
     Sqs
 };
@@ -22,15 +25,23 @@ const USAGE: &'static str = "
 Simple SQS queue reader. Automatically retries and deduplicates until the
 desired number of messages have been read.
 
+Can either output messages to stdout or transfer them to another queue.
+
+NOTE: transferring message attributes is currently not supported, and thus
+custom attributes will not be preserved when moving messages.
+
 Usage:
-    sqs-reader <queue-name> [--count=<n>] [--full] [--drain]
+    sqs-reader <in-queue> [--stdout] [--count=<n>] [--drain] [--full]
+    sqs-reader <in-queue> <out-queue> [--stdout] [--count=<n>] [--drain] [--full]
     sqs-reader -h | --help
 
 Options:
-  -h, --help        Show this screen.
-  --full            Print full response with message attributes instead of
-                    message body.
-  --drain           Remove messages from queue after all have been read.
+  -h, --help    Show this screen.
+  --stdout      Dump messages to stdout.
+  --count=<n>   Number of messages to read.
+  --drain       Remove messages from queue after all have been read.
+  --full        Print full response with message attributes instead of just
+                printing the message body.
 ";
 
 
@@ -39,20 +50,28 @@ fn main () {
                       .and_then(|dopt| dopt.parse())
                       .unwrap_or_else(|e| e.exit());
     let region = Region::default();
-
     let sqs = SqsClient::new(region);
-    let url = sqs.get_queue_url(GetQueueUrlRequest {
-        queue_name: args.get_str("<queue-name>").to_string(),
-        queue_owner_aws_account_id: None
-    }).sync()
-        .map(|m| m.queue_url.expect("extracting url from response"))
-        .expect("fetching queue url");
+
+    let in_queue = args.get_str("<in-queue>").to_string();
+    let in_url = get_queue_url(&sqs, &in_queue)
+        .expect(&format!("fetching input queue url for {}", &in_queue));
+
+    let out_queue = args.find("<out-queue>").and_then(|value|
+        if let Plain(Some(name)) = value { Some(name) } else { None }
+    );
+    let out_url : Option<String> = out_queue.map(|name|
+        get_queue_url(&sqs, &name.as_str().to_string())
+            .expect(&format!("fetching output queue url for {}", &name.as_str()))
+    );
+
+    let drain = args.get_bool("--drain");
+
 
     let mut all_messages = HashMap::new();
     let count: u32 = args
         .get_str("--count")
         .parse().ok()
-        .unwrap_or_else(|| get_approximate_queue_size(&sqs, &url).expect("getting queue size"));
+        .unwrap_or_else(|| get_approximate_queue_size(&sqs, &in_url).expect("getting queue size"));
     let mut attribute_names = vec!("All".to_owned());
     attribute_names.resize(1, "All".to_owned());
     while all_messages.len() < count as usize {
@@ -60,7 +79,7 @@ fn main () {
             attribute_names: Some(attribute_names.clone()),
             max_number_of_messages: Some(1),
             message_attribute_names: None,
-            queue_url: url.to_string(),
+            queue_url: in_url.to_string(),
             receive_request_attempt_id: None,
             visibility_timeout: Some(0),
             wait_time_seconds: None
@@ -77,23 +96,39 @@ fn main () {
     // Wait until all messages have been received to purge them. This reduces,
     // but does not eliminate, the chance of message "loss". One of the API
     // calls below can still theoretically panic.
-    if args.get_bool("--drain") {
+    if drain {
         for (_id, message) in &all_messages {
             let handle = message.receipt_handle.to_owned();
             sqs.delete_message(DeleteMessageRequest {
-                queue_url: url.to_string(),
+                queue_url: in_url.to_string(),
                 receipt_handle: handle.expect("getting receipt handle")
             }).sync().unwrap();
         }
     }
 
     for (_id, message) in all_messages {
-        if args.get_bool("--full") {
-            print_full_message(message);
-        } else {
-            println!("{}", message.body.expect("getting body"));
+        let body = message.body.to_owned().expect("getting body");
+
+        if args.get_bool("--stdout") {
+            if args.get_bool("--full") {
+                print_full_message(message);
+            } else {
+                println!("{}", body);
+            }
+        }
+
+        if let Some(url) = &out_url {
+            let response = send_message(&sqs, &url, body);
+            println!("{}", response);
         }
     }
+}
+
+fn get_queue_url (sqs: &SqsClient, name: &String) -> Result<String, GetQueueUrlError> {
+    sqs.get_queue_url(GetQueueUrlRequest {
+        queue_name: name.to_owned(),
+        queue_owner_aws_account_id: None
+    }).sync().map(|m| m.queue_url.expect("extracting url from response"))
 }
 
 fn get_approximate_queue_size (sqs: &SqsClient, url: &String) -> Result<u32, &'static str> {
@@ -121,4 +156,22 @@ fn print_full_message (message: Message) {
     });
 
     println!("{}", value.to_string());
+}
+
+fn send_message (sqs: &SqsClient, url: &String, body: String) -> String {
+    let response = sqs.send_message(SendMessageRequest {
+        delay_seconds: None,
+        message_attributes: None,
+        message_body: body,
+        message_deduplication_id: None,
+        message_group_id: None,
+        queue_url: url.to_string()
+    }).sync().expect("sending message");
+
+    let value = json!({
+        "MD5OfMessageBody": response.md5_of_message_body.expect("getting md5 of body"),
+        "MessageId": response.message_id.expect("getting message id"),
+    });
+
+    value.to_string()
 }
