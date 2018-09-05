@@ -8,6 +8,8 @@ use docopt::Docopt;
 use rusoto_core::Region;
 use rusoto_sqs::{
     DeleteMessageRequest,
+    GetQueueAttributesRequest,
+    GetQueueAttributesResult,
     GetQueueUrlRequest,
     Message,
     ReceiveMessageRequest,
@@ -21,7 +23,7 @@ Simple SQS queue reader. Automatically retries and deduplicates until the
 desired number of messages have been read.
 
 Usage:
-    sqs-reader <queue-name> <count> [--full] [--drain]
+    sqs-reader <queue-name> [--count=<n>] [--full] [--drain]
     sqs-reader -h | --help
 
 Options:
@@ -47,7 +49,10 @@ fn main () {
         .expect("fetching queue url");
 
     let mut all_messages = HashMap::new();
-    let count: i32 = args.get_str("<count>").parse().unwrap();
+    let count: u32 = args
+        .get_str("--count")
+        .parse().ok()
+        .unwrap_or_else(|| get_approximate_queue_size(&sqs, &url).expect("getting queue size"));
     let mut attribute_names = vec!("All".to_owned());
     attribute_names.resize(1, "All".to_owned());
     while all_messages.len() < count as usize {
@@ -89,6 +94,20 @@ fn main () {
             println!("{}", message.body.expect("getting body"));
         }
     }
+}
+
+fn get_approximate_queue_size (sqs: &SqsClient, url: &String) -> Result<u32, &'static str> {
+    fn get_size (m: GetQueueAttributesResult) -> Option<u32> {
+        m.attributes.and_then(|attr|
+            attr.get("ApproximateNumberOfMessages")
+                .and_then(|value| value.parse::<u32>().ok())
+        )
+    }
+
+    sqs.get_queue_attributes(GetQueueAttributesRequest {
+        queue_url: url.to_string(),
+        attribute_names: Some(vec!("ApproximateNumberOfMessages".to_string()))
+    }).sync().ok().and_then(get_size).ok_or("no count provided")
 }
 
 fn print_full_message (message: Message) {
