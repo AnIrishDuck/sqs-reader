@@ -81,7 +81,7 @@ fn main () {
             message_attribute_names: None,
             queue_url: in_url.to_string(),
             receive_request_attempt_id: None,
-            visibility_timeout: Some(0),
+            visibility_timeout: Some(if drain { 60 } else { 0 }),
             wait_time_seconds: None
         }).sync().expect("reading from queue");
 
