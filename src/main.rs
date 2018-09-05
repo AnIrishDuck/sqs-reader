@@ -42,7 +42,9 @@ fn main () {
     let url = sqs.get_queue_url(GetQueueUrlRequest {
         queue_name: args.get_str("<queue-name>").to_string(),
         queue_owner_aws_account_id: None
-    }).sync().unwrap().queue_url.unwrap();
+    }).sync()
+        .map(|m| m.queue_url.expect("extracting url from response"))
+        .expect("fetching queue url");
 
     let mut all_messages = HashMap::new();
     let count: i32 = args.get_str("<count>").parse().unwrap();
@@ -55,12 +57,12 @@ fn main () {
             receive_request_attempt_id: None,
             visibility_timeout: Some(0),
             wait_time_seconds: None
-        }).sync().unwrap();
+        }).sync().expect("reading from queue");
 
         match response.messages {
             Some(messages) => {
                 for message in messages {
-                    let id = message.clone().message_id.unwrap();
+                    let id = message.clone().message_id.expect("getting id");
                     all_messages.insert(id, message);
                 }
             },
@@ -76,7 +78,7 @@ fn main () {
             let copy = message.clone();
             sqs.delete_message(DeleteMessageRequest {
                 queue_url: url.to_string(),
-                receipt_handle: copy.receipt_handle.unwrap()
+                receipt_handle: copy.receipt_handle.expect("getting receipt handle")
             }).sync().unwrap();
         }
     }
@@ -85,7 +87,7 @@ fn main () {
         if args.get_bool("--full") {
             print_full_message(message);
         } else {
-            println!("{}", message.body.unwrap());
+            println!("{}", message.body.expect("getting body"));
         }
     }
 }
@@ -93,10 +95,10 @@ fn main () {
 fn print_full_message (message: Message) {
     let attributes = message.attributes.unwrap_or(HashMap::new());
     let value = json!({
-        "Body": message.body.unwrap(),
-        "ReceiptHandle": message.receipt_handle.unwrap(),
-        "MD5OfBody": message.md5_of_body.unwrap(),
-        "MessageId": message.message_id.unwrap(),
+        "Body": message.body.expect("getting body"),
+        "ReceiptHandle": message.receipt_handle.expect("getting receipt handle"),
+        "MD5OfBody": message.md5_of_body.expect("getting md5 of body"),
+        "MessageId": message.message_id.expect("getting message id"),
         "Attributes": attributes,
     });
 
