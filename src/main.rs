@@ -48,9 +48,11 @@ fn main () {
 
     let mut all_messages = HashMap::new();
     let count: i32 = args.get_str("<count>").parse().unwrap();
+    let mut attribute_names = vec!("All".to_owned());
+    attribute_names.resize(1, "All".to_owned());
     while all_messages.len() < count as usize {
         let response = sqs.receive_message(ReceiveMessageRequest {
-            attribute_names: Some(vec!("All".to_string())),
+            attribute_names: Some(attribute_names.clone()),
             max_number_of_messages: Some(1),
             message_attribute_names: None,
             queue_url: url.to_string(),
@@ -62,7 +64,7 @@ fn main () {
         match response.messages {
             Some(messages) => {
                 for message in messages {
-                    let id = message.clone().message_id.expect("getting id");
+                    let id = message.message_id.to_owned().expect("getting id");
                     all_messages.insert(id, message);
                 }
             },
@@ -75,10 +77,10 @@ fn main () {
     // calls below can still theoretically panic.
     if args.get_bool("--drain") {
         for (_id, message) in &all_messages {
-            let copy = message.clone();
+            let handle = message.receipt_handle.to_owned();
             sqs.delete_message(DeleteMessageRequest {
                 queue_url: url.to_string(),
-                receipt_handle: copy.receipt_handle.expect("getting receipt handle")
+                receipt_handle: handle.expect("getting receipt handle")
             }).sync().unwrap();
         }
     }
