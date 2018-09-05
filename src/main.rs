@@ -93,25 +93,12 @@ fn main () {
         }
     }
 
-    // Wait until all messages have been received to purge them. This reduces,
-    // but does not eliminate, the chance of message "loss". One of the API
-    // calls below can still theoretically panic.
-    if drain {
-        for (_id, message) in &all_messages {
-            let handle = message.receipt_handle.to_owned();
-            sqs.delete_message(DeleteMessageRequest {
-                queue_url: in_url.to_string(),
-                receipt_handle: handle.expect("getting receipt handle")
-            }).sync().unwrap();
-        }
-    }
-
     for (_id, message) in all_messages {
         let body = message.body.to_owned().expect("getting body");
 
         if args.get_bool("--stdout") {
             if args.get_bool("--full") {
-                print_full_message(message);
+                print_full_message(message.clone());
             } else {
                 println!("{}", body);
             }
@@ -120,6 +107,16 @@ fn main () {
         if let Some(url) = &out_url {
             let response = send_message(&sqs, &url, body);
             println!("{}", response);
+        }
+
+        // Only purge the message after it has been properly handled. This
+        // avoids any possibility of data loss.
+        if drain {
+            let handle = message.receipt_handle.to_owned();
+            sqs.delete_message(DeleteMessageRequest {
+                queue_url: in_url.to_string(),
+                receipt_handle: handle.expect("getting receipt handle")
+            }).sync().unwrap();
         }
     }
 }
