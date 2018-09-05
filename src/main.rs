@@ -61,14 +61,11 @@ fn main () {
             wait_time_seconds: None
         }).sync().expect("reading from queue");
 
-        match response.messages {
-            Some(messages) => {
-                for message in messages {
-                    let id = message.message_id.to_owned().expect("getting id");
-                    all_messages.insert(id, message);
-                }
-            },
-            None => (),
+        if let Some(messages) = response.messages {
+            for message in messages {
+                let id = message.message_id.to_owned().expect("getting id");
+                all_messages.insert(id, message);
+            }
         }
     }
 
