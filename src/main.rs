@@ -1,4 +1,5 @@
 extern crate docopt;
+extern crate fnv;
 extern crate rusoto_core;
 extern crate rusoto_sqs;
 #[macro_use]
@@ -6,6 +7,7 @@ extern crate serde_json;
 
 use docopt::Docopt;
 use docopt::Value::Plain;
+use fnv::FnvHashMap;
 use rusoto_core::Region;
 use rusoto_sqs::{
     DeleteMessageRequest,
@@ -31,14 +33,18 @@ NOTE: transferring message attributes is currently not supported, and thus
 custom attributes will not be preserved when moving messages.
 
 Usage:
-    sqs-reader <in-queue> [--stdout] [--count=<n>] [--drain] [--full]
-    sqs-reader <in-queue> <out-queue> [--stdout] [--count=<n>] [--drain] [--full]
+    sqs-reader <in-queue> [--stdout] (--all|[--min=<n>]) [--drain] [--full]
+    sqs-reader <in-queue> <out-queue> [--stdout] (--all|[--min=<n>]) [--drain] [--full]
     sqs-reader -h | --help
 
 Options:
   -h, --help    Show this screen.
   --stdout      Dump messages to stdout.
-  --count=<n>   Number of messages to read.
+  --all         Read all messages from queue. Uses ApproximateNumberOfMessages
+                to set minimum message count. Read below for caveats.
+  --min=<n>     Minimum number of messages to read [default: 1]. Use with care.
+                This process will block and not acknowledge any read message
+                until this count is reached.
   --drain       Remove messages from queue after all have been read.
   --full        Print full response with message attributes instead of just
                 printing the message body.
@@ -56,6 +62,7 @@ fn main () {
     let in_url = get_queue_url(&sqs, &in_queue)
         .expect(&format!("fetching input queue url for {}", &in_queue));
 
+    let stdout = args.get_bool("--stdout");
     let out_queue = args.find("<out-queue>").and_then(|value|
         if let Plain(Some(name)) = value { Some(name) } else { None }
     );
@@ -64,14 +71,21 @@ fn main () {
             .expect(&format!("fetching output queue url for {}", &name.as_str()))
     );
 
+    if !stdout && !out_url.is_some() {
+        panic!("Either --stdout or an output queue name must be provided");
+    }
+
     let drain = args.get_bool("--drain");
+    let all = args.get_bool("--all");
 
-
-    let mut all_messages = HashMap::new();
-    let count: u32 = args
-        .get_str("--count")
-        .parse().ok()
-        .unwrap_or_else(|| get_approximate_queue_size(&sqs, &in_url).expect("getting queue size"));
+    let mut all_messages = FnvHashMap::default();
+    let count: u32 = if all {
+        get_approximate_queue_size(&sqs, &in_url)
+            .expect("Could not get approximate input queue size")
+    } else {
+        args.get_str("--min").parse()
+            .expect("Could not parse --min count")
+    };
     let mut attribute_names = vec!("All".to_owned());
     attribute_names.resize(1, "All".to_owned());
     while all_messages.len() < count as usize {
@@ -96,7 +110,7 @@ fn main () {
     for (_id, message) in all_messages {
         let body = message.body.to_owned().expect("getting body");
 
-        if args.get_bool("--stdout") {
+        if stdout {
             if args.get_bool("--full") {
                 print_full_message(message.clone());
             } else {
