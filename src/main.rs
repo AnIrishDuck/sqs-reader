@@ -22,6 +22,7 @@ use rusoto_sqs::{
     Sqs
 };
 use std::collections::HashMap;
+use std::cmp;
 
 const USAGE: &'static str = "
 Simple SQS queue reader. Automatically retries and deduplicates until the
@@ -33,18 +34,21 @@ NOTE: transferring message attributes is currently not supported, and thus
 custom attributes will not be preserved when moving messages.
 
 Usage:
-    sqs-reader <in-queue> [--stdout] (--all|[--min=<n>]) [--drain] [--full]
-    sqs-reader <in-queue> <out-queue> [--stdout] (--all|[--min=<n>]) [--drain] [--full]
+    sqs-reader <in-queue> [--stdout] (--all|[--count=<n>]) [--block] [--drain] [--full]
+    sqs-reader <in-queue> <out-queue> [--stdout] (--all|[--count=<n>]) [--block] [--drain] [--full]
     sqs-reader -h | --help
 
 Options:
   -h, --help    Show this screen.
   --stdout      Dump messages to stdout.
   --all         Read all messages from queue. Uses ApproximateNumberOfMessages
-                to set minimum message count. Read below for caveats.
-  --min=<n>     Minimum number of messages to read [default: 1]. Use with care.
-                This process will block and not acknowledge any read message
-                until this count is reached.
+                to guess number of messages in the queue.
+  --count=<n>   Number of messages to attempt to read [default: 1].
+  --block       Acknowledge messages and block until the desired number of
+                messages has been read. Can result in this process holding all
+                messages on the queue (and thus rendering them invisible to
+                other readers) for an indeterminate amount of time. Use with
+                caution.
   --drain       Remove messages from queue after all have been read.
   --full        Print full response with message attributes instead of just
                 printing the message body.
@@ -77,15 +81,23 @@ fn main () {
 
     let drain = args.get_bool("--drain");
     let all = args.get_bool("--all");
+    let block = args.get_bool("--block");
 
     let mut all_messages = FnvHashMap::default();
-    let count: u32 = if all {
-        get_approximate_queue_size(&sqs, &in_url)
-            .expect("Could not get approximate input queue size")
-    } else {
-        args.get_str("--min").parse()
-            .expect("Could not parse --min count")
+
+    let total = get_approximate_queue_size(&sqs, &in_url)
+        .expect("Could not get approximate input queue size");
+
+    let user_specified_count = if all { total } else {
+        args.get_str("--count").parse().expect("Could not parse --count")
     };
+
+    let count: u32 = if block {
+        user_specified_count
+    } else {
+        cmp::min(total, user_specified_count)
+    };
+
     let mut attribute_names = vec!("All".to_owned());
     attribute_names.resize(1, "All".to_owned());
     while all_messages.len() < count as usize {
@@ -99,11 +111,18 @@ fn main () {
             wait_time_seconds: None
         }).sync().expect("reading from queue");
 
-        if let Some(messages) = response.messages {
+        let current_count = if let Some(messages) = response.messages {
+            let len = messages.len();
             for message in messages {
                 let id = message.message_id.to_owned().expect("getting id");
                 all_messages.insert(id, message);
             }
+            len
+        } else { 0 };
+
+
+        if !block && current_count == 0 {
+            break
         }
     }
 
